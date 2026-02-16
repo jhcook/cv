@@ -125,6 +125,38 @@ python run.py --jd SRE_Role.txt --ca-bundle /path/to/ca-bundle.crt
 
 The `--ca-bundle` flag takes highest priority and overrides any environment variable.
 
+### Merging Public CAs into a Custom Bundle
+
+If your custom CA bundle only contains corporate/proxy certificates, requests to
+public sites (e.g. `seek.com.au`) will fail SSL verification. Fix this by
+appending Python's built-in public root CAs to your bundle:
+
+```bash
+# Find your certifi CA bundle path
+python -c "import certifi; print(certifi.where())"
+
+# Append public CAs to your custom bundle (one-time)
+cat "$(python -c 'import certifi; print(certifi.where())')" >> /path/to/custom-ca-bundle.pem
+```
+
+Or keep a separate merged file:
+
+```bash
+cat /path/to/custom-ca-bundle.pem \
+    "$(python -c 'import certifi; print(certifi.where())')" \
+    > /path/to/merged-ca-bundle.pem
+
+export REQUESTS_CA_BUNDLE=/path/to/merged-ca-bundle.pem
+```
+
+Verify the merged bundle works:
+
+```bash
+openssl s_client -connect www.seek.com.au:443 \
+    -CAfile /path/to/merged-ca-bundle.pem 2>/dev/null | head -5
+# Should show: Verify return code: 0 (ok)
+```
+
 ## Directory Structure
 
 The project isolates user data from source code:

@@ -185,13 +185,16 @@ def upload_to_gcs(local_path: str, gcs_path: str):
     except Exception as e:
         logger.error(f"Failed to upload to GCS: {e}")
 
-def _resolve_path(path: str, default_subdir: str) -> str:
+def _resolve_path(path: str, default_subdir: str | list[str]) -> str:
     """
     Smartly resolves a path.
     1. If it exists as is, return it.
     2. If it is a URL/GCS path, return it.
-    3. If it exists in user_content/{default_subdir}/{path}, return that.
+    3. If it exists in user_content/{subdir}/{path} for any subdir, return that.
     4. Return original path (to let downstream fail/handle it).
+
+    ``default_subdir`` can be a single directory name or a list of directory
+    names to search in order (first match wins).
     """
     if not path:
         return path
@@ -200,13 +203,13 @@ def _resolve_path(path: str, default_subdir: str) -> str:
     if os.path.exists(path) or path.startswith("http") or path.startswith("gs://"):
         return path
     
-    # 2. Check in user_content subdir
-    # Assuming user_content is at project root.
-    # We could make this robust to CWD but project structure is fixed now.
-    namespaced_path = os.path.join("user_content", default_subdir, path)
-    if os.path.exists(namespaced_path):
-        logger.info(f"Resolved '{path}' to '{namespaced_path}'")
-        return namespaced_path
+    # 2. Check in user_content subdirs (in priority order)
+    subdirs = [default_subdir] if isinstance(default_subdir, str) else default_subdir
+    for subdir in subdirs:
+        namespaced_path = os.path.join("user_content", subdir, path)
+        if os.path.exists(namespaced_path):
+            logger.info(f"Resolved '{path}' to '{namespaced_path}'")
+            return namespaced_path
         
     return path
 def main():
@@ -299,24 +302,12 @@ def _run_main_logic(args, parser):
     
     # 0. Pre-validate Template (if provided) to fail fast / save tokens
     if args.template:
-        template_candidate = _resolve_path(args.template, "templates")
-        
-        # Fallback: Check library logic if not found in templates
-        # _resolve_path returns original if not found in subdir
-        if not os.path.exists(template_candidate) and not template_candidate.startswith(("http", "gs://")):
-            # Try library
-            lib_candidate = _resolve_path(args.template, "library")
-            if os.path.exists(lib_candidate):
-                template_candidate = lib_candidate
-                logger.info(f"Found template in library: {template_candidate}")
+        template_candidate = _resolve_path(args.template, ["templates", "library", "generated_cvs"])
 
-        # Just check existence for local files. 
-        # For HTTP/S, we assume validity or fail during download later (saving tokens is hard if we don't check HEAD, 
-        # but at least we don't do LLM first). 
-        # Actually, let's just resolve and check existence if it's not a URL.
-        if not template_candidate.startswith("http") and not template_candidate.startswith("gs://"):
+        # Just check existence for local files.
+        if not template_candidate.startswith(("http", "gs://")):
             if not os.path.exists(template_candidate):
-                 logger.error(f"Template file not found: {template_candidate}. Checked CWD, user_content/templates, and user_content/library.")
+                 logger.error(f"Template file not found: {template_candidate}. Checked CWD, user_content/templates, user_content/library, and user_content/generated_cvs.")
                  sys.exit(1)
 
     # 1. Ingest JD
@@ -325,8 +316,8 @@ def _run_main_logic(args, parser):
     
     logger.info(f"Ingesting Job Description from: {args.jd}")
     
-    # Resolve JD path
-    jd_path = _resolve_path(args.jd, "inputs")
+    # Resolve JD path — check inputs first, then generated CVs and library
+    jd_path = _resolve_path(args.jd, ["inputs", "generated_cvs", "library"])
 
     if jd_path.startswith("http"):
         jd_text = read_url(jd_path)
@@ -433,11 +424,7 @@ def _run_main_logic(args, parser):
             # parsing logic moved to start of script
             # We can re-run the resolution logic or rely on a var, 
             # but for safety let's just re-run the robust resolution
-            template_candidate = _resolve_path(args.template, "templates")
-            if not os.path.exists(template_candidate) and not template_candidate.startswith(("http", "gs://")):
-                lib_candidate = _resolve_path(args.template, "library")
-                if os.path.exists(lib_candidate):
-                    template_candidate = lib_candidate
+            template_candidate = _resolve_path(args.template, ["templates", "library", "generated_cvs"])
 
             if template_candidate.startswith("http"):
                 template_path = download_template(template_candidate)
