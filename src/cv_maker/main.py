@@ -62,6 +62,7 @@ class StatusLogHandler(logging.Handler):
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cv_maker.ingest import read_url, read_docx, ingest_library, read_pdf
+from cv_maker.ssl_helpers import get_ca_bundle, set_ca_bundle_override
 from cv_maker.llm_client import LLMClient
 from cv_maker.generator import CVGenerator
 
@@ -133,7 +134,7 @@ def download_template(url: str) -> str:
         import tempfile
         
         logger.info(f"Downloading template from: {url}")
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url, timeout=15, verify=get_ca_bundle())
         resp.raise_for_status()
         
         # Create temp file
@@ -232,8 +233,13 @@ def _main_cli():
     parser.add_argument("--summarize", type=int, default=10, help="Years of recent experience to detail (default: 10). Older roles are summarized. Set to 0 to disable.")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase output verbosity (-v=WARNING, -vv=INFO, -vvv=DEBUG)")
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress status output (ERROR only)")
+    parser.add_argument("--ca-bundle", help="Path to a custom CA certificate bundle for HTTPS verification (proxy environments)")
     
     args = parser.parse_args()
+
+    # Configure custom CA bundle if provided via CLI
+    if getattr(args, 'ca_bundle', None):
+        set_ca_bundle_override(args.ca_bundle)
 
     # Check for quiet mode
     if getattr(args, 'quiet', False):

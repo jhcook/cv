@@ -25,6 +25,7 @@ import logging
 from pathlib import Path
 from typing import List
 from cv_maker.models import CVData, JobDescription, Experience, EarlierExperience
+from cv_maker.ssl_helpers import configure_ssl_env
 
 # Logger is configured in main.py
 logger = logging.getLogger(__name__)
@@ -78,6 +79,9 @@ class LLMClient:
         Supports Google Generative AI (Gemini) and OpenAI.
         Falls back to Mock Data if calls fail.
         """
+        # Ensure custom CA bundle is visible to httpx-based SDKs
+        configure_ssl_env()
+
         # Define Mock Data inner function for reuse
         def get_mock_data():
             logger.warning("[!] Using MOCK DATA for demonstration (API keys missing or validation failed).")

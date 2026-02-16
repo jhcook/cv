@@ -6,7 +6,7 @@ An advanced, AI-powered tool for tailoring your CV and generating cover letters 
 
 - **Multi-Provider LLM Support**:
   - **Google Vertex AI**: Enterprise-grade performance (Priority).
-  - **Google AI Studio**: Access Gemini 1.5 Pro/Flash models.
+  - **Google AI Studio**: Access Gemini 2.5 Pro/Flash models.
   - **OpenAI**: Support for GPT-3.5/4.
   - **Auto-Discovery**: Automatically finds and caches available Gemini models.
   - **Mock Data**: Fallback mode for testing without API keys.
@@ -105,6 +105,25 @@ python run.py \
 | `--list-models`| List available LLM models and exit. | |
 | `-v` / `--verbose` | Increase verbosity level. | |
 | `-q` / `--quiet` | Suppress status output (ERROR only). | |
+| `--ca-bundle` | Path to a custom CA certificate bundle (proxy environments). | |
+
+## Proxy / Custom CA Bundle
+
+If you are behind a corporate proxy that uses a custom CA certificate, set one of these environment variables (in priority order):
+
+```bash
+export REQUESTS_CA_BUNDLE=/path/to/ca-bundle.crt
+export CURL_CA_BUNDLE=/path/to/ca-bundle.crt
+export SSL_CERT_FILE=/path/to/ca-bundle.crt
+```
+
+Alternatively, pass it directly via the CLI:
+
+```bash
+python run.py --jd SRE_Role.txt --ca-bundle /path/to/ca-bundle.crt
+```
+
+The `--ca-bundle` flag takes highest priority and overrides any environment variable.
 
 ## Directory Structure
 
@@ -118,9 +137,18 @@ The project isolates user data from source code:
   - `logs/`: Application logs (`cv.log`).
   - `library_cache/`: Cached downloads from Cloud Drives.
   - `.model_cache.json`: Cache of discovered LLM models.
-- **`src/`**: Application source code.
+- **`src/`**: Application source code (`cv_maker/` package).
+- **`tests/`**: Unit tests for `cv_maker` modules.
 
 ## Development
 
-- **`inspect_template.py`**: Debug script to analyze DOCX styles.
-- **`compare_docs.py`**: Debug script to verify formatting preservation.
+### Running Tests
+
+```bash
+python -m pytest tests/
+```
+
+### Debug Scripts
+
+- **`inspect_template.py`**: Analyze DOCX styles.
+- **`compare_docs.py`**: Verify formatting preservation.

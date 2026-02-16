@@ -28,7 +28,7 @@ from onedrivedownloader import download as onedrive_download
 import urllib3
 import logging
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from cv_maker.ssl_helpers import get_ca_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -114,10 +114,12 @@ def read_url(url: str) -> str:
     """
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        ca_bundle = get_ca_bundle()
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=10, verify=ca_bundle)
             response.raise_for_status()
         except requests.exceptions.SSLError:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             logger.warning(f"SSL verification failed for {url}. Retrying without verification (Unsafe)...")
             response = requests.get(url, headers=headers, timeout=10, verify=False)
             response.raise_for_status()
@@ -163,18 +165,18 @@ def download_from_gdrive(url: str, output_dir: str):
     """
     try:
         logger.info(f"Downloading from Google Drive: {url}")
-        # gdown download_folder is better for folders
-        # Monkeypatch requests.Session.request to default verify=False because of proxy issues
+        # Monkeypatch requests.Session.request to use the configured CA bundle
+        # instead of blindly disabling verification.
         import requests.sessions
         original_request = requests.sessions.Session.request
-        
+        ca_bundle = get_ca_bundle()
+
         def patched_request(self, method, url, *args, **kwargs):
-            # Force verify=False to bypass corporate proxy issues
-            kwargs['verify'] = False
+            kwargs['verify'] = ca_bundle
             return original_request(self, method, url, *args, **kwargs)
-            
+
         requests.sessions.Session.request = patched_request
-        
+
         try:
             # remaining_ok=True allows downloading up to the limit without error
             gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False, remaining_ok=True)
@@ -183,7 +185,7 @@ def download_from_gdrive(url: str, output_dir: str):
         finally:
             # Restore original
             requests.sessions.Session.request = original_request
-            
+
     except Exception as e:
         logger.error(f"Error downloading from Google Drive: {e}")
 
@@ -262,7 +264,7 @@ def ingest_github(username: str) -> str:
         
     try:
         logger.info(f"Fetching GitHub profile for: {username}")
-        response = requests.get(api_url, headers=headers, timeout=10)
+        response = requests.get(api_url, headers=headers, timeout=10, verify=get_ca_bundle())
         
         if response.status_code == 404:
             logger.warning(f"GitHub user '{username}' not found.")
