@@ -314,7 +314,7 @@ class LLMClient:
             cutoff_year = current_year - summarize_years
             
             # Rule 1: Strict inclusion of recent roles
-            rule_1 = f"1. Identify ALL roles ending in {cutoff_year} or later (including 'Present'). You MUST include these in the 'experience' array in FULL DETAIL."
+            rule_1 = f"1. Identify ALL roles ending in {cutoff_year} or later (including 'Present'). You MUST include these in the 'experience' array in FULL DETAIL, listed in strict reverse-chronological order (most recent first)."
             
             # Rule 6: Strict summarization of older roles
             rule_6 = f"""
@@ -323,7 +323,7 @@ class LLMClient:
             """
         else:
             # Default/Disable mode: Focus on relevance
-            rule_1 = "1. Select the top most relevant roles from the Master CV. Provide these in FULL DETAIL in the 'experience' array."
+            rule_1 = "1. Select the top most relevant roles from the Master CV. Provide these in FULL DETAIL in the 'experience' array, listed in strict reverse-chronological order (most recent first)."
             rule_6 = "6. Do NOT use the 'earlier_experience' array. Include all relevant roles in the main 'experience' section."
 
         prompt = f"""
@@ -338,6 +338,7 @@ class LLMClient:
         5. TONE: Expert, Senior Executive, Technical Leader. Avoid generic fluff. Focus on "what" and "how".
         {rule_6}
         7. Use the TECHNICAL PORTFOLIO to substantiate skills in the 'Projects' or 'Competencies' sections, citing specific repositories where relevant.
+        8. ORDERING: Within the 'experience' array, roles MUST be ordered reverse-chronologically by end date ('Present' counts as the most recent). The 'earlier_experience' array MUST also be ordered reverse-chronologically.
 
         Target Role: {jd.summary}
         Target Skills: {', '.join(jd.key_skills)}

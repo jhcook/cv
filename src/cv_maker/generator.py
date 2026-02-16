@@ -149,10 +149,16 @@ class CVGenerator:
             for name, stats in style_stats.items():
                 # print(f"DEBUG STYLE '{name}': H={stats['header_score']}, B={stats['bullet_score']}")
                 
-                if stats['header_score'] > max_h_score:
-                    # Avoid picking 'Title' style as H1 if logical
-                    if 'title' not in name.lower(): 
-                        max_h_score = stats['header_score']
+                h_score = stats['header_score']
+                if h_score > max_h_score:
+                    # Skip title-like and bullet/list styles for h1 detection
+                    name_lower = name.lower()
+                    if 'title' in name_lower:
+                        pass
+                    elif 'list' in name_lower or 'bullet' in name_lower:
+                        pass
+                    else:
+                        max_h_score = h_score
                         best_h1 = name
                 
                 if stats['bullet_score'] > max_b_score:
@@ -271,12 +277,12 @@ class CVGenerator:
             for element in list(body):
                 # Always keep SectPr
                 if element.tag.endswith('sectPr'): 
-                    print("DEBUG: Preserving sectPr")
+                    logger.debug("    > Preserving sectPr")
                     continue
                 
                 # Check for Graphics (preserve layout)
                 if 'w:drawing' in element.xml or 'w:pict' in element.xml:
-                     print(f"DEBUG: Preserving Graphics in {element.tag}")
+                     logger.debug(f"    > Preserving Graphics in {element.tag}")
                      continue
 
                 # Check if this element corresponds to a mapped object
@@ -289,7 +295,7 @@ class CVGenerator:
                         break
                 
                 if is_mapped:
-                    print(f"DEBUG: Preserving mapped section element: {element.tag}")
+                    logger.debug(f"    > Preserving mapped section element: {element.tag}")
                     continue
                 
                 # If it's a Table, and we decided NOT to map it, do we remove it?
@@ -316,22 +322,20 @@ class CVGenerator:
                     except:
                         full_text = "?"
                     
-                    print(f"DEBUG: Removing {element.tag} - {full_text[:30]}")
+                    logger.debug(f"    > Removing {element.tag} - {full_text[:30]}")
                     if element.getparent() == body:
                         body.remove(element)
                         if element in body:
-                            print(f"DEBUG: FAILED TO REMOVE {element.tag}")
+                            logger.debug(f"    > FAILED TO REMOVE {element.tag}")
                         else:
-                            print(f"DEBUG: Successfully removed {element.tag}")
+                            logger.debug(f"    > Successfully removed {element.tag}")
                     else:
-                         print(f"DEBUG: Parent mismatch. Parent: {element.getparent()}")
+                         logger.debug(f"    > Parent mismatch. Parent: {element.getparent()}")
                         
         except Exception as e:
             logger.warning(f"Warning cleaning template body: {e}")
         
-        # DEBUG SAVE
-        self.document.save("DEBUG_OUTPUT.docx")
-        print("DEBUG: Saved intermediate DEBUG_OUTPUT.docx")
+        logger.debug("    > Template body cleared")
 
     def _clear_headers_footers(self):
         """Clears content from headers and footers."""
@@ -385,23 +389,23 @@ class CVGenerator:
         Executes content_func() to generate new elements (appended to body).
         Then moves those new elements to self.injections buffer for later assembly.
         """
-        # 1. Snapshot end of body
+        # 1. Snapshot current body elements by identity
         try:
             body = self.document.element.body
-            initial_count = len(body)
+            existing_elements = set(id(e) for e in body)
             
             # 2. Generate content (appended to end)
             content_func()
             
-            # 3. Find new elements
-            body = self.document.element.body # Re-fetch
-            new_elements = list(body)[initial_count:]
+            # 3. Find new elements (present now but not before)
+            body = self.document.element.body  # Re-fetch
+            new_elements = [e for e in body if id(e) not in existing_elements]
             
             # 4. Store in buffer, remove from body
             if hasattr(target_obj, '_element'):
                 target_element = target_obj._element
                 
-                print(f"DEBUG: Buffering {len(new_elements)} elements for {target_element.tag}")
+                logger.debug(f"    > Buffering {len(new_elements)} elements for injection after {target_element.tag}")
                 
                 # Remove from body immediately so they don't interfere with next generation
                 for elem in new_elements:
@@ -420,18 +424,18 @@ class CVGenerator:
         """
         Executes content_func(), buffers new elements in self.header_elements.
         """
-        # 1. Snapshot end of body
+        # 1. Snapshot current body elements by identity
         body = self.document.element.body
-        initial_count = len(body)
+        existing_elements = set(id(e) for e in body)
         
-        # 2. Generate content (appended to end)
+        # 2. Generate content (appended to body)
         content_func()
         
-        # 3. Buffer and remove
+        # 3. Find new elements (present now but not before) and buffer them
         body = self.document.element.body
-        new_elements = list(body)[initial_count:]
+        new_elements = [e for e in body if id(e) not in existing_elements]
         
-        print(f"DEBUG: Buffering {len(new_elements)} header elements")
+        logger.debug(f"    > Buffering {len(new_elements)} header elements")
         
         for elem in new_elements:
             if elem.getparent() is not None:
@@ -446,7 +450,7 @@ class CVGenerator:
         - Existing body elements (Preserved templates)
         - self.injections (Interleaved after targets)
         """
-        print("DEBUG: Assembling document...")
+        logger.debug("    > Assembling document...")
         body = self.document.element.body
         
         # 1. Start with header
@@ -462,14 +466,14 @@ class CVGenerator:
             
             # Check if this element is a target for injection
             if elem in self.injections:
-                print(f"DEBUG: Injecting {len(self.injections[elem])} buffered elements after {elem.tag}")
+                logger.debug(f"    > Injecting {len(self.injections[elem])} buffered elements after {elem.tag}")
                 final_elements.extend(self.injections[elem])
         
         # 3. Replace body content
         # Clear body (careful not to delete the elements we just collected!)
         body[:] = final_elements 
         
-        print(f"DEBUG: Assembly complete. Total elements: {len(body)}")
+        logger.debug(f"    > Assembly complete. Total elements: {len(body)}")
 
     def _setup_styles(self):
         try:
@@ -511,17 +515,27 @@ class CVGenerator:
             self.document.add_paragraph()  # Spacer
 
         def add_summary():
-             self.document.add_paragraph(data.executive_summary)
+             p = self.document.add_paragraph(data.executive_summary)
+             p.paragraph_format.widow_control = True
 
         def add_competencies():
-            for category, skills in data.competencies:
+            items = list(data.competencies)
+            for i, (category, skills) in enumerate(items):
                 p = self.document.add_paragraph(style=self.styles['bullet'])
                 p.add_run(category).bold = True
                 p.add_run(f" {skills}")
+                p.paragraph_format.keep_together = True
+                p.paragraph_format.widow_control = True
+                # Keep competencies as a block — chain all but the last
+                if i < len(items) - 1:
+                    p.paragraph_format.keep_with_next = True
 
         def add_experience():
             for job in data.experience:
-                self.document.add_paragraph() # Top spacer for job
+                # Spacer — keep_with_next pulls the entry to the same page
+                spacer = self.document.add_paragraph()
+                spacer.paragraph_format.keep_with_next = True
+                spacer.paragraph_format.space_after = 0
                 
                 # Company Line
                 p = self.document.add_paragraph()
@@ -529,6 +543,7 @@ class CVGenerator:
                 p.add_run(f" | {job.location} | ")
                 p.add_run(job.dates).italic = True
                 p.paragraph_format.keep_with_next = True
+                p.paragraph_format.keep_together = True
                 
                 # Title Line
                 p = self.document.add_paragraph()
@@ -539,29 +554,40 @@ class CVGenerator:
                     p = self.document.add_paragraph(job.summary_italic)
                     p.italic = True
                     p.paragraph_format.widow_control = True
+                    # Bind summary to first bullet
+                    if job.bullets:
+                        p.paragraph_format.keep_with_next = True
 
                 # Bullets
-                for title, desc in job.bullets:
+                bullets = list(job.bullets)
+                for i, (title, desc) in enumerate(bullets):
                     p = self.document.add_paragraph(style=self.styles['bullet'])
                     p.add_run(title).bold = True
                     p.add_run(f" {desc}")
+                    p.paragraph_format.keep_together = True
                     p.paragraph_format.widow_control = True
 
         def add_earlier_experience():
-             for job in data.earlier_experience:
-                self.document.add_paragraph() # Spacer
+            for job in data.earlier_experience:
+                # Spacer — binds to entry
+                spacer = self.document.add_paragraph()
+                spacer.paragraph_format.keep_with_next = True
+                spacer.paragraph_format.space_after = 0
                 
                 # Title, Company Line (No dates)
                 p = self.document.add_paragraph()
                 p.add_run(f"{job.title}, {job.company}").bold = True
                 p.paragraph_format.keep_with_next = True
+                p.paragraph_format.keep_together = True
                 
-                # Summary
+                # Summary — keep together so it doesn't split across page
                 p = self.document.add_paragraph(job.summary)
+                p.paragraph_format.keep_together = True
                 p.paragraph_format.widow_control = True
 
         def add_projects():
-             p = self.document.add_paragraph('Visible at: github.com/username')
+             github_url = data.github_url or 'github.com/username'
+             p = self.document.add_paragraph(f'Visible at: {github_url}')
              p.italic = True 
              p.paragraph_format.keep_with_next = True
 
@@ -569,11 +595,13 @@ class CVGenerator:
                 p = self.document.add_paragraph(style=self.styles['bullet'])
                 p.add_run(title).bold = True
                 p.add_run(f" {desc}")
+                p.paragraph_format.keep_together = True
                 p.paragraph_format.widow_control = True
 
         def add_education():
             for edu in data.education:
                 p = self.document.add_paragraph(edu)
+                p.paragraph_format.keep_together = True
                 p.paragraph_format.widow_control = True
             
             if data.certifications:
@@ -591,11 +619,16 @@ class CVGenerator:
             self._prepend_content(add_header_content)
 
         # --- EXECUTIVE SUMMARY ---
+        # Use _prepend_content when no template section exists to guarantee
+        # the summary is placed directly after the header in the final document.
         if 'summary' in self.section_map:
              self._inject_content_after(self.section_map['summary']['object'], add_summary)
         else:
-             p = self.document.add_paragraph('EXECUTIVE SUMMARY', style=self.styles['h1'])
-             add_summary()
+             def add_summary_section():
+                 p = self.document.add_paragraph('EXECUTIVE SUMMARY', style=self.styles['h1'])
+                 p.paragraph_format.keep_with_next = True
+                 add_summary()
+             self._prepend_content(add_summary_section)
 
         # --- CORE COMPETENCIES ---
         if data.competencies:
@@ -605,34 +638,29 @@ class CVGenerator:
                 p = self.document.add_paragraph('CORE COMPETENCIES', style=self.styles['h1'])
                 add_competencies()
  
-        # --- PROFESSIONAL EXPERIENCE ---
+        # --- PROFESSIONAL EXPERIENCE + EARLIER CAREER EXPERIENCE ---
+        # When the template has an 'experience' section mapped, inject both
+        # detailed experience AND earlier career experience together so they
+        # appear sequentially after the mapped heading during assembly.
         if 'experience' in self.section_map:
-            self._inject_content_after(self.section_map['experience']['object'], add_experience)
+            def add_all_experience():
+                add_experience()
+                if data.earlier_experience:
+                    self.document.add_paragraph()  # Spacer between sections
+                    p = self.document.add_paragraph('EARLIER CAREER EXPERIENCE', style=self.styles['h1'])
+                    p.paragraph_format.keep_with_next = True
+                    add_earlier_experience()
+            self._inject_content_after(self.section_map['experience']['object'], add_all_experience)
         else:
             p = self.document.add_paragraph('PROFESSIONAL EXPERIENCE', style=self.styles['h1'])
             p.paragraph_format.keep_with_next = True
             add_experience()
-
-        if 'experience' not in self.section_map:
-             self.document.add_paragraph() # Spacer only if we appended
-
-        # --- EARLIER CAREER EXPERIENCE ---
-        if data.earlier_experience:
-            # We treat this as part of experience usually, but if there is a separate section?
-            # Unlikely. We just append it if not mapped? 
-            # Or if experience IS mapped, do we inject this too?
-            # It's safer to just append it blindly for now unless we search for "Earlier".
-            # If "Experience" was mapped, we injected into it. 
-            # We should probably inject this AFTER the experience content?
-            # This is tricky because we just lost reference to the injected content location.
-            # But the 'add_experience' function injects everything.
-            # Let's just append it for now as a fallback, or handle it nicely later.
-            p = self.document.add_paragraph('EARLIER CAREER EXPERIENCE', style=self.styles['h1'])
-            p.paragraph_format.keep_with_next = True
-            add_earlier_experience()
-
-        if 'experience' not in self.section_map:
-             self.document.add_paragraph() # Spacer
+            self.document.add_paragraph()  # Spacer
+            if data.earlier_experience:
+                p = self.document.add_paragraph('EARLIER CAREER EXPERIENCE', style=self.styles['h1'])
+                p.paragraph_format.keep_with_next = True
+                add_earlier_experience()
+                self.document.add_paragraph()  # Spacer
 
         # --- PROJECTS ---
         if data.projects:

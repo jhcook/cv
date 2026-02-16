@@ -117,6 +117,115 @@ class TestCVGeneratorAssembly(unittest.TestCase):
         self.assertEqual(paragraphs[0].text, "HEADER")
         self.assertEqual(paragraphs[1].text, "TEMPLATE SECTION")
         self.assertEqual(paragraphs[2].text, "INJECTED CONTENT")
+    def test_generate_section_order(self):
+        """Verify generate() places sections in correct order: header → summary → competencies → experience → earlier."""
+        from cv_maker.models import CVData, Experience, EarlierExperience
+        import tempfile, os
+
+        gen = CVGenerator()
+
+        data = CVData(
+            name="Test User",
+            title="Engineer",
+            contact_info="test@example.com",
+            executive_summary="Summary text.",
+            competencies=[("Category:", "Skill 1, Skill 2.")],
+            experience=[
+                Experience(
+                    title="Senior Engineer",
+                    company="ACME",
+                    location="City",
+                    dates="Jan 2022 – Present",
+                    bullets=[("Delivery:", "Led project X.")]
+                )
+            ],
+            earlier_experience=[
+                EarlierExperience(
+                    title="Junior Engineer",
+                    company="Old Corp",
+                    summary="Did early career work."
+                )
+            ],
+            projects=[("Proj:", "Description.")],
+            education=["BS Computer Science"],
+            certifications="Cert A"
+        )
+
+        with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as f:
+            output_path = f.name
+
+        try:
+            gen.generate(data, output_path)
+
+            from docx import Document
+            doc = Document(output_path)
+            texts = [p.text for p in doc.paragraphs if p.text.strip()]
+
+            # Find heading positions
+            heading_indices = {}
+            for i, text in enumerate(texts):
+                if text == 'EXECUTIVE SUMMARY':
+                    heading_indices['summary'] = i
+                elif text == 'CORE COMPETENCIES':
+                    heading_indices['competencies'] = i
+                elif text == 'PROFESSIONAL EXPERIENCE':
+                    heading_indices['experience'] = i
+                elif text == 'EARLIER CAREER EXPERIENCE':
+                    heading_indices['earlier'] = i
+
+            # Assert correct order
+            self.assertIn('summary', heading_indices, "EXECUTIVE SUMMARY heading not found")
+            self.assertIn('competencies', heading_indices, "CORE COMPETENCIES heading not found")
+            self.assertIn('experience', heading_indices, "PROFESSIONAL EXPERIENCE heading not found")
+            self.assertIn('earlier', heading_indices, "EARLIER CAREER EXPERIENCE heading not found")
+
+            self.assertLess(heading_indices['summary'], heading_indices['competencies'],
+                           "Summary must come before Competencies")
+            self.assertLess(heading_indices['competencies'], heading_indices['experience'],
+                           "Competencies must come before Experience")
+            self.assertLess(heading_indices['experience'], heading_indices['earlier'],
+                           "Experience must come before Earlier Experience")
+        finally:
+            os.unlink(output_path)
+
+    def test_experience_preserves_input_order(self):
+        """Verify generator preserves the order of experience entries as given (LLM contract)."""
+        from cv_maker.models import CVData, Experience
+        import tempfile, os
+
+        gen = CVGenerator()
+
+        data = CVData(
+            name="Test User",
+            title="Engineer",
+            contact_info="test@example.com",
+            executive_summary="Summary.",
+            competencies=[],
+            experience=[
+                Experience(title="Role A", company="COMPANY A", location="City", dates="2023 – Present", bullets=[]),
+                Experience(title="Role B", company="COMPANY B", location="City", dates="2020 – 2023", bullets=[]),
+                Experience(title="Role C", company="COMPANY C", location="City", dates="2017 – 2020", bullets=[]),
+            ]
+        )
+
+        with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as f:
+            output_path = f.name
+
+        try:
+            gen.generate(data, output_path)
+
+            from docx import Document
+            doc = Document(output_path)
+            texts = [p.text for p in doc.paragraphs if p.text.strip()]
+
+            # Find company lines (they appear as "COMPANY X | City | dates")
+            company_lines = [t for t in texts if t.startswith('COMPANY')]
+            self.assertEqual(len(company_lines), 3)
+            self.assertTrue(company_lines[0].startswith('COMPANY A'))
+            self.assertTrue(company_lines[1].startswith('COMPANY B'))
+            self.assertTrue(company_lines[2].startswith('COMPANY C'))
+        finally:
+            os.unlink(output_path)
 
 if __name__ == '__main__':
     unittest.main()

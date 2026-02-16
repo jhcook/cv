@@ -59,6 +59,7 @@ class CVData:
     projects: List[tuple[str, str]] = field(default_factory=list)
     education: List[str] = field(default_factory=list)
     certifications: str = ""
+    github_url: str = ""
 
 @dataclass
 class JobDescription:

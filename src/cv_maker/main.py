@@ -362,6 +362,8 @@ def _run_main_logic(args, parser):
 
     logger.info("Tailoring CV (this may take a moment)...")
     cv_data = client.tailor_cv(master_cv_text, jd_data, summarize_years=args.summarize)
+    if args.github:
+        cv_data.github_url = f"github.com/{args.github}"
 
     logger.info("Drafting Cover Letter...")
     cover_letter_text = client.generate_cover_letter(master_cv_text, jd_data)

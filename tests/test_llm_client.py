@@ -170,6 +170,19 @@ class TestLLMClient(unittest.TestCase):
             
             # Projects
             self.assertEqual(cv.projects[0], ("Proj 1", ""))
+    def test_tailor_cv_prompt_contains_ordering_rules(self):
+        """Verify the tailor_cv prompt includes explicit reverse-chronological ordering instructions."""
+        client = llm_client.LLMClient()
+        fake_json = '{}'
+
+        with patch.object(client, '_call_llm', return_value=fake_json):
+            jd = JobDescription(raw_text="JD", role_title="Dev", key_skills=["Python"], summary="Role")
+            client.tailor_cv("CV", jd, summarize_years=10)
+            call_args = client._call_llm.call_args[0][0]
+
+            self.assertIn("reverse-chronological order", call_args)
+            self.assertIn("ORDERING", call_args)
+            self.assertIn("'Present' counts as the most recent", call_args)
 
 if __name__ == '__main__':
     unittest.main()
