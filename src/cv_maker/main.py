@@ -237,6 +237,7 @@ def _main_cli():
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase output verbosity (-v=WARNING, -vv=INFO, -vvv=DEBUG)")
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress status output (ERROR only)")
     parser.add_argument("--ca-bundle", help="Path to a custom CA certificate bundle for HTTPS verification (proxy environments)")
+    parser.add_argument("--provider", default="auto", choices=["auto", "gemini", "vertex", "openai", "anthropic", "github"], help="LLM provider to use (default: auto)")
     
     args = parser.parse_args()
 
@@ -288,7 +289,7 @@ def _run_main_logic(args, parser):
     """
     if args.list_models:
         logger.info("[*] discovering models...")
-        client = LLMClient()
+        client = LLMClient(provider=args.provider)
         models = client.discover_models()
         if models:
             # Save to cache explicitly when user runs --list-models
@@ -353,7 +354,7 @@ def _run_main_logic(args, parser):
     master_cv_text = "\n\n".join([f"--- SOURCE: {k} ---\n{v}" for k, v in library.items()])
 
     # 3. LLM Pipeline
-    client = LLMClient()
+    client = LLMClient(provider=args.provider)
     
     logger.info("Analyzing Job Description...")
     jd_data = client.analyze_job_description(jd_text)

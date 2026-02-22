@@ -35,13 +35,14 @@ class LLMClient:
     Abstraction layer for LLM providers.
     Handles prompted requests for CV analysis and tailoring.
     """
-    def __init__(self, provider: str = "gemini"):
+    def __init__(self, provider: str = "auto"):
         self.provider = provider
         self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        if not self.api_key:
+        if not self.api_key and self.provider not in ["auto", "vertex", "github", "anthropic"]:
             logger.warning("No API key found. LLM features will fallback to Mock Data.")
         
         self.cache_file = Path("user_content/.model_cache.json")
+        self._vertex_region_cache = {}
 
     def _load_cache(self) -> List[str]:
         """Loads valid models from local cache if less than 24h old."""
@@ -72,6 +73,63 @@ class LLMClient:
                 }, f)
         except Exception as e:
             logger.warning(f"Failed to save model cache: {e}")
+
+    def _attempt_with_retry(self, generate_func, model_name, prompt, max_retries=3, base_delay=2.0) -> str:
+        """Attempts to call a model with exponential backoff on transient errors."""
+        for attempt in range(max_retries):
+            try:
+                return generate_func(model_name, prompt)
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Do not retry for model not found or invalid inputs
+                unrecoverable = ["not found", "404", "invalid", "does not exist", "400", "bad request"]
+                if any(x in error_msg for x in unrecoverable) or attempt == max_retries - 1:
+                    logger.warning(f"Model {model_name} failed (attempt {attempt + 1}/{max_retries}): {e}")
+                    raise
+                
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Model {model_name} encountered transient error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+
+    def _has_adc(self) -> bool:
+        """Checks if Google Application Default Credentials are valid."""
+        try:
+            import google.auth
+            credentials, _ = google.auth.default()
+            return credentials is not None
+        except Exception:
+            return False
+
+    def _get_vertex_models_for_region(self, region: str) -> List[str]:
+        """Dynamically discovers and caches models available in a specific Vertex AI region."""
+        if region in self._vertex_region_cache:
+            return self._vertex_region_cache[region]
+            
+        try:
+            import warnings
+            from google import genai
+            import os
+            
+            with warnings.catch_warnings():
+                 warnings.filterwarnings("ignore", category=UserWarning, module="google.genai")
+                 _temp_api_key = os.environ.pop("GEMINI_API_KEY", None)
+                 try:
+                     client = genai.Client(vertexai=True, location=region)
+                     models = []
+                     for m in client.models.list():
+                         name = m.name.split("/")[-1]
+                         if "gemini" in name:
+                             models.append(name)
+                     self._vertex_region_cache[region] = models
+                     logger.info(f"Discovered {len(models)} Gemini models in Vertex AI region {region}.")
+                     return models
+                 finally:
+                     if _temp_api_key is not None:
+                         os.environ["GEMINI_API_KEY"] = _temp_api_key
+        except Exception as e:
+            logger.warning(f"Failed to list Vertex models in region {region}: {e}")
+            self._vertex_region_cache[region] = []
+            return []
 
     def _call_llm(self, prompt: str) -> str:
         """
@@ -117,99 +175,223 @@ class LLMClient:
             }
             """
 
-        if not self.api_key:
+        if not self.api_key and not self._has_adc() and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
             return get_mock_data()
         
         try:
-            # 1. Vertex AI (Priority if provider is 'vertex' or configured)
-            if self.provider == "vertex" or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            # 0. Github & Anthropic (Placeholders for future implementation)
+            if self.provider == "github":
+                # TODO: Implement GitHub Models API
+                raise NotImplementedError("GitHub provider is not yet implemented.")
+            if self.provider == "anthropic":
+                # TODO: Implement Anthropic API
+                raise NotImplementedError("Anthropic provider is not yet implemented.")
+                
+            # 1. Vertex AI (Priority if provider is 'auto' or 'vertex')
+            if self.provider in ["auto", "vertex"] and (os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or self._has_adc()):
                 try:
-                    import vertexai
-                    from vertexai.generative_models import GenerativeModel
-                    # Ensure project/location are set in env or via gcloud init
-                    vertexai.init() 
-                    model = GenerativeModel("gemini-1.5-flash")
-                    response = model.generate_content(prompt)
-                    return response.text
+                    import warnings
+                    from google import genai
+                    import httpx
+                    from cv_maker.ssl_helpers import get_ca_bundle
+                    
+                    # Create a custom httpx client to enforce the CA bundle (same as gemini provider)
+                    ca_bundle = get_ca_bundle()
+                    http_options = {}
+                    
+                    if isinstance(ca_bundle, str) and os.path.exists(ca_bundle):
+                        http_options = {'client_args': {'verify': ca_bundle}}
+                        
+                    PRIORITY_MODELS = [
+                        "gemini-2.5-pro",
+                        "gemini-2.5-flash",
+                        "gemini-2.5-flash-lite"
+                    ]
+                    
+                    PRIORITY_REGIONS = [
+                        "australia-southeast1",
+                        "asia-southeast1",
+                        "us-central1"
+                    ]
+                    
+                    last_exception = None
+                    for model_name in PRIORITY_MODELS:
+                        for region in PRIORITY_REGIONS:
+                            # 1. Check if model exists in this region dynamically
+                            available_models = self._get_vertex_models_for_region(region)
+                            if model_name not in available_models:
+                                logger.debug(f"Vertex model {model_name} not available in {region}. Skipping.")
+                                continue
+                                
+                            try:
+                                logger.info(f"Attempting Vertex AI model: {model_name} in {region}")
+                                
+                                with warnings.catch_warnings():
+                                     warnings.filterwarnings("ignore", category=UserWarning, module="google.genai")
+                                     # Do not pass api_key when vertexai=True, otherwise it overrides ADC.
+                                     # Also hide the env var so google.genai doesn't automatically load it.
+                                     _temp_api_key = os.environ.pop("GEMINI_API_KEY", None)
+                                     try:
+                                         client = genai.Client(vertexai=True, location=region, http_options=http_options)
+                                     finally:
+                                         if _temp_api_key is not None:
+                                             os.environ["GEMINI_API_KEY"] = _temp_api_key
+                                
+                                def _gen_vertex(m, p, c=client):
+                                    with warnings.catch_warnings():
+                                        warnings.filterwarnings("ignore", category=UserWarning, module="google.genai")
+                                        response = c.models.generate_content(model=m, contents=p)
+                                        return response.text
+                                
+                                return self._attempt_with_retry(_gen_vertex, model_name, prompt)
+                            except Exception as e:
+                                last_exception = e
+                                logger.warning(f"Vertex AI failed for {model_name} in {region}: {e}")
+                                continue
+                            
+                    if last_exception:
+                        if self.provider == "vertex":
+                            raise last_exception
+                        else:
+                            logger.warning(f"Vertex AI models failed: {last_exception}. Falling back to next provider...")
                 except ImportError:
-                    logger.warning("google-cloud-aiplatform not installed. Skipping Vertex.")
+                    logger.warning("google-genai not installed. Skipping Vertex ai.")
+                    if self.provider == "vertex":
+                        raise
                 except Exception as e:
                     logger.warning(f"Vertex AI failed: {e}. Falling back...")
+                    if self.provider == "vertex":
+                        raise
 
             # 2. OpenAI
-            if self.api_key and self.api_key.startswith("sk-"):
+            if self.provider in ["auto", "openai"] and self.api_key and self.api_key.startswith("sk-"):
                 import openai
-                client = openai.OpenAI(api_key=self.api_key)
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo", # Fallback model
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7
-                )
-                return response.choices[0].message.content
+                import httpx
+                from cv_maker.ssl_helpers import get_ca_bundle
+                
+                # Configure httpx client for OpenAI with CA bundle
+                ca_bundle = get_ca_bundle()
+                http_client = httpx.Client(verify=ca_bundle if isinstance(ca_bundle, str) and os.path.exists(ca_bundle) else True)
+                
+                client = openai.OpenAI(api_key=self.api_key, http_client=http_client)
+                
+                OPENAI_PRIORITY = ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-4o-mini', 'gpt-3.5-turbo']
+                last_exception = None
+                
+                for model_name in OPENAI_PRIORITY:
+                    try:
+                        logger.info(f"Attempting OpenAI model: {model_name}")
+                        def _gen_openai(m, p):
+                            response = client.chat.completions.create(
+                                model=m,
+                                messages=[{"role": "user", "content": p}],
+                                temperature=0.7
+                            )
+                            return response.choices[0].message.content
+                        return self._attempt_with_retry(_gen_openai, model_name, prompt)
+                    except Exception as e:
+                        last_exception = e
+                        continue
+                        
+                if last_exception:
+                    if self.provider == "openai":
+                        raise last_exception
+                    else:
+                        logger.warning(f"OpenAI failed: {last_exception}. Falling back...")
 
             # 3. Google GenAI (New SDK)
-            from google import genai
-            
-            client = genai.Client(api_key=self.api_key)
-            
-            # 1. Try Cached Models first
-            cached_models = self._load_cache()
-            if cached_models:
-                logger.info(f"Loaded {len(cached_models)} models from cache.")
-                for model_name in cached_models:
+            if self.provider in ["auto", "gemini"] and self.api_key:
+                from google import genai
+                import httpx
+                from cv_maker.ssl_helpers import get_ca_bundle
+                
+                # Create a custom httpx client to enforce the CA bundle
+                ca_bundle = get_ca_bundle()
+                http_options = {}
+                
+                if isinstance(ca_bundle, str) and os.path.exists(ca_bundle):
+                    http_options = {'client_args': {'verify': ca_bundle}}
+                    
+                client = genai.Client(api_key=self.api_key, http_options=http_options)
+                
+                GEMINI_PRIORITY = [
+                    'gemini-2.5-pro',
+                    'gemini-2.5-flash',
+                    'gemini-2.5-flash-lite'
+                ]
+                
+                last_exception = None
+                
+                # 1. Try our preferred priority models first
+                for model_name in GEMINI_PRIORITY:
                     try:
-                        logger.info(f"Attempting cached model: {model_name}")
-                        response = client.models.generate_content(
-                            model=model_name,
-                            contents=prompt
-                        )
-                        return response.text
+                        logger.info(f"Attempting GenAI priority model: {model_name}")
+                        def _gen_genai(m, p):
+                            response = client.models.generate_content(
+                                model=m,
+                                contents=p
+                            )
+                            return response.text
+                        return self._attempt_with_retry(_gen_genai, model_name, prompt)
                     except Exception as e:
-                        logger.warning(f"Cached model {model_name} failed: {e}")
-            
-            # 2. If Cache failed/empty, try Auto-Discovery
-            logger.info("Cache failed or empty. Attempting auto-discovery...")
-            try:
-                 discovered = self.discover_models(client)
-                 
-                 # Save discovered to cache immediately so next run is fast
-                 if discovered:
-                     self._save_cache(discovered)
-                 
-                 # 3. Try Discovered Models
-                 for model_name in discovered:
-                     try:
-                         logger.info(f"Attempting discovered model: {model_name}")
-                         response = client.models.generate_content(
-                            model=model_name,
-                            contents=prompt
-                         )
-                         return response.text
-                     except Exception as e:
-                         # Keep trying others
-                         logger.warning(f"Model {model_name} failed: {e}")
-            except Exception as e:
-                logger.warning(f"Auto-discovery failed: {e}")
-
-            # 4. Last Resort: Hardcoded Fallback (if discovery completely broke)
-            fallback_models = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-pro']
-            logger.info("Discovery failed. Trying hardcoded fallbacks...")
-            
-            last_exception = None
-            for model_name in fallback_models:
+                        last_exception = e
+                        continue
+                
+                # 2. Try Cached Models as fallback
+                cached_models = self._load_cache()
+                if cached_models:
+                    logger.info(f"Loaded {len(cached_models)} models from cache.")
+                    for model_name in cached_models:
+                        if model_name in GEMINI_PRIORITY:
+                            continue # Already tried
+                        try:
+                            logger.info(f"Attempting cached model: {model_name}")
+                            def _gen_cached(m, p):
+                                response = client.models.generate_content(
+                                    model=m,
+                                    contents=p
+                                )
+                                return response.text
+                            return self._attempt_with_retry(_gen_cached, model_name, prompt)
+                        except Exception as e:
+                            logger.warning(f"Cached model {model_name} failed: {e}")
+                
+                # 3. If Cache failed/empty, try Auto-Discovery
+                logger.info("Cache failed or empty. Attempting auto-discovery...")
                 try:
-                    logger.info(f"Attempting fallback model: {model_name}")
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt
-                    )
-                    return response.text
+                     discovered = self.discover_models(client)
+                     
+                     # Save discovered to cache immediately so next run is fast
+                     if discovered:
+                         self._save_cache(discovered)
+                         
+                         # Only call discovered models IF the cache was empty to begin with 
+                         # (Meaning we had to discover them). We don't want to call models that 
+                         # are NOT in the cache (which is what the original logic did by accident).
+                         if not cached_models:
+                             for model_name in discovered:
+                                 if model_name in GEMINI_PRIORITY:
+                                     continue
+                                 try:
+                                     logger.info(f"Attempting discovered model: {model_name}")
+                                     def _gen_disc(m, p):
+                                         response = client.models.generate_content(
+                                             model=m,
+                                             contents=p
+                                         )
+                                         return response.text
+                                     return self._attempt_with_retry(_gen_disc, model_name, prompt)
+                                 except Exception as e:
+                                     # Keep trying others
+                                     logger.warning(f"Model {model_name} failed: {e}")
                 except Exception as e:
-                     logger.warning(f"Fallback {model_name} failed: {e}")
-                     last_exception = e
-            
+                    logger.warning(f"Auto-discovery failed: {e}")
+
             if last_exception:
                 raise last_exception
+                
+            # If no provider responded and auto fell through
+            raise ValueError(f"No configured LLM provider was able to generate content. Provider mode: {self.provider}")
 
         except ImportError as e:
             logger.error(f"Missing dependency for specific provider: {e}")
