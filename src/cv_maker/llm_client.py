@@ -197,10 +197,13 @@ class LLMClient:
                     
                     # Create a custom httpx client to enforce the CA bundle (same as gemini provider)
                     ca_bundle = get_ca_bundle()
-                    http_options = {}
                     
-                    if isinstance(ca_bundle, str) and os.path.exists(ca_bundle):
-                        http_options = {'client_args': {'verify': ca_bundle}}
+                    # CV Maker sends very large prompts (Master CV + JD). Increase timeout.
+                    timeout_sec = 120.0  # 2 minutes
+                    verify_val = ca_bundle if isinstance(ca_bundle, str) and os.path.exists(ca_bundle) else True
+                    
+                    _hclient = httpx.Client(timeout=httpx.Timeout(timeout_sec), verify=verify_val)
+                    http_options = {'httpx_client': _hclient}
                         
                     PRIORITY_MODELS = [
                         "gemini-2.5-pro",
@@ -240,8 +243,8 @@ class LLMClient:
                                 def _gen_vertex(m, p, c=client):
                                     with warnings.catch_warnings():
                                         warnings.filterwarnings("ignore", category=UserWarning, module="google.genai")
-                                        response = c.models.generate_content(model=m, contents=p)
-                                        return response.text
+                                        response = c.models.generate_content_stream(model=m, contents=p)
+                                        return "".join([chunk.text for chunk in response if chunk.text])
                                 
                                 return self._attempt_with_retry(_gen_vertex, model_name, prompt)
                             except Exception as e:
@@ -307,10 +310,13 @@ class LLMClient:
                 
                 # Create a custom httpx client to enforce the CA bundle
                 ca_bundle = get_ca_bundle()
-                http_options = {}
                 
-                if isinstance(ca_bundle, str) and os.path.exists(ca_bundle):
-                    http_options = {'client_args': {'verify': ca_bundle}}
+                # CV Maker sends very large prompts (Master CV + JD). Increase timeout.
+                timeout_sec = 120.0  # 2 minutes
+                verify_val = ca_bundle if isinstance(ca_bundle, str) and os.path.exists(ca_bundle) else True
+                
+                _hclient = httpx.Client(timeout=httpx.Timeout(timeout_sec), verify=verify_val)
+                http_options = {'httpx_client': _hclient}
                     
                 client = genai.Client(api_key=self.api_key, http_options=http_options)
                 
@@ -327,11 +333,11 @@ class LLMClient:
                     try:
                         logger.info(f"Attempting GenAI priority model: {model_name}")
                         def _gen_genai(m, p):
-                            response = client.models.generate_content(
+                            response = client.models.generate_content_stream(
                                 model=m,
                                 contents=p
                             )
-                            return response.text
+                            return "".join([chunk.text for chunk in response if chunk.text])
                         return self._attempt_with_retry(_gen_genai, model_name, prompt)
                     except Exception as e:
                         last_exception = e
@@ -347,11 +353,11 @@ class LLMClient:
                         try:
                             logger.info(f"Attempting cached model: {model_name}")
                             def _gen_cached(m, p):
-                                response = client.models.generate_content(
+                                response = client.models.generate_content_stream(
                                     model=m,
                                     contents=p
                                 )
-                                return response.text
+                                return "".join([chunk.text for chunk in response if chunk.text])
                             return self._attempt_with_retry(_gen_cached, model_name, prompt)
                         except Exception as e:
                             logger.warning(f"Cached model {model_name} failed: {e}")
@@ -375,11 +381,11 @@ class LLMClient:
                                  try:
                                      logger.info(f"Attempting discovered model: {model_name}")
                                      def _gen_disc(m, p):
-                                         response = client.models.generate_content(
+                                         response = client.models.generate_content_stream(
                                              model=m,
                                              contents=p
                                          )
-                                         return response.text
+                                         return "".join([chunk.text for chunk in response if chunk.text])
                                      return self._attempt_with_retry(_gen_disc, model_name, prompt)
                                  except Exception as e:
                                      # Keep trying others
