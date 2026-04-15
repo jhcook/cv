@@ -7,8 +7,9 @@ An advanced, AI-powered tool for tailoring your CV and generating cover letters 
 - **Multi-Provider LLM Support**:
   - **Google Vertex AI**: Enterprise-grade performance (Priority).
   - **Google AI Studio**: Access Gemini 2.5 Pro/Flash models.
-  - **OpenAI**: Support for GPT-3.5/4.
-  - **Auto-Discovery**: Automatically finds and caches available Gemini models.
+  - **OpenAI**: Support for GPT-4o/5 family models.
+  - **Auto-Discovery**: Automatically finds and caches available models per provider.
+  - **Model Pinning**: Override automatic model selection with `--model`.
   - **Mock Data**: Fallback mode for testing without API keys.
 
 - **Smart Ingestion**:
@@ -91,18 +92,33 @@ python run.py \
   --verbose
 ```
 
+### Model Selection
+
+```bash
+# Pin a specific model (bypasses automatic selection)
+python run.py --jd SRE_Role.txt --model gpt-4o
+
+# Use a specific provider with model pinning
+python run.py --jd SRE_Role.txt --provider openai --model gpt-4o-mini
+
+# List available models for a provider
+python run.py --list-models --provider openai
+```
+
 ### Arguments
 
-| Argument | Description | Default Search Path |
+| Argument | Description | Default |
 | :--- | :--- | :--- |
 | `--jd` | **Required**. Job Description file or URL. | `user_content/inputs/` |
-| `--library` | Master CVs folder (DOCX/PDF). | `user_content/library/` (Default) |
+| `--library` | Master CVs folder (DOCX/PDF). | `user_content/library/` |
 | `--template` | Custom DOCX template file. | `user_content/templates/` |
 | `--output` | Output filename or path (supports `gs://`). | `user_content/generated_cvs/` |
 | `--github` | GitHub username for portfolio section. | |
-| `--suggestions` | Comma-separated template overrides (e.g. 'font,header'). | |
-| `--summarize` | Years of recent experience to detail (default: 10). | |
-| `--list-models`| List available LLM models and exit. | |
+| `--provider` | LLM provider: `auto`, `gemini`, `vertex`, `openai`, `anthropic`, `github`. | `auto` |
+| `--model` | Pin a specific model name (e.g. `gpt-4o`, `gemini-2.5-pro`). Overrides automatic model selection. | Auto-detected |
+| `--suggestions` | Comma-separated template overrides (e.g. `font,header`). | |
+| `--summarize` | Years of recent experience to detail. | `10` |
+| `--list-models`| Discover and list available models for the selected provider, then exit. | |
 | `-v` / `--verbose` | Increase verbosity level. | |
 | `-q` / `--quiet` | Suppress status output (ERROR only). | |
 | `--ca-bundle` | Path to a custom CA certificate bundle (proxy environments). | |
@@ -157,16 +173,37 @@ openssl s_client -connect www.seek.com.au:443 \
 # Should show: Verify return code: 0 (ok)
 ```
 
+## Logging & Observability
+
+All LLM interactions are logged to `user_content/logs/cv.log` with DEBUG-level detail. The log directory is created automatically on first run.
+
+Each LLM call logs:
+- **Timing**: Elapsed time for each call and retry attempt.
+- **Payload sizes**: Prompt character count and response character count.
+- **Token usage**: Prompt, completion, and total tokens (OpenAI).
+- **Model context**: Provider, model name, and retry state.
+- **Error diagnostics**: Full error messages with elapsed time on failure paths.
+
+To increase console verbosity:
+
+```bash
+# Verbose console output
+python run.py --jd SRE_Role.txt -v
+
+# Full debug trace in the log file (always enabled)
+tail -f user_content/logs/cv.log
+```
+
 ## Directory Structure
 
 The project isolates user data from source code:
 
-- **`user_content/`**: All your local data.
+- **`user_content/`**: All your local data (created automatically).
   - `library/`: Place your Master CVs here.
   - `inputs/`: Default folder for Job Descriptions.
   - `templates/`: Default folder for custom templates.
   - `generated_cvs/`: Where tailored CVs are saved.
-  - `logs/`: Application logs (`cv.log`).
+  - `logs/`: Application logs (`cv.log`) — created automatically.
   - `library_cache/`: Cached downloads from Cloud Drives.
   - `.model_cache.json`: Cache of discovered LLM models.
 - **`src/`**: Application source code (`cv_maker/` package).
