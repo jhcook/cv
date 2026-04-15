@@ -46,17 +46,13 @@ class TestLLMClient(unittest.TestCase):
         # Create explicit chain
         mock_client = MagicMock()
         mock_models = MagicMock()
-        mock_generate_content = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = "Gemini Response"
+        mock_chunk = MagicMock()
+        mock_chunk.text = "Gemini Response"
         
-        # Link them
+        # Link them — code calls generate_content_stream which returns an iterable of chunks
         mock_genai.Client.return_value = mock_client
-        # Simplest approach: just assign the attribute
         mock_client.models = mock_models
-        # Link generate_content
-        mock_models.generate_content = mock_generate_content
-        mock_generate_content.return_value = mock_response
+        mock_models.generate_content_stream = MagicMock(return_value=[mock_chunk])
 
         # Use patch.dict for env vars
         with patch.dict(os.environ, {"GEMINI_API_KEY": "mock_key"}, clear=True):
@@ -183,6 +179,89 @@ class TestLLMClient(unittest.TestCase):
             self.assertIn("reverse-chronological order", call_args)
             self.assertIn("ORDERING", call_args)
             self.assertIn("'Present' counts as the most recent", call_args)
+
+    def test_model_passthrough_openai(self):
+        """Verify that --model pins the OpenAI call to that specific model."""
+        mock_openai = sys.modules['openai']
+
+        mock_client = MagicMock()
+        mock_chat = MagicMock()
+        mock_completions = MagicMock()
+        mock_create = MagicMock()
+        mock_response = MagicMock()
+        mock_choice = MagicMock()
+        mock_message = MagicMock()
+
+        mock_message.content = "Pinned Model Response"
+        mock_choice.message = mock_message
+        mock_response.choices = [mock_choice]
+
+        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat = mock_chat
+        mock_chat.completions = mock_completions
+        mock_completions.create = mock_create
+        mock_create.return_value = mock_response
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-mock-openai-key"}, clear=True):
+            client = llm_client.LLMClient(provider="openai", model="gpt-4o-mini")
+            result = client._call_llm("Test Prompt")
+
+            self.assertEqual(result, "Pinned Model Response")
+            # Verify the pinned model was used (first positional arg to create)
+            call_kwargs = mock_completions.create.call_args
+            self.assertEqual(call_kwargs.kwargs.get("model") or call_kwargs[1].get("model"), "gpt-4o-mini")
+
+    def test_model_passthrough_init(self):
+        """Verify LLMClient stores the model attribute."""
+        client = llm_client.LLMClient(provider="openai", model="gpt-4o")
+        self.assertEqual(client.model, "gpt-4o")
+        self.assertEqual(client.provider, "openai")
+
+        # Default: no model pinned
+        client_default = llm_client.LLMClient()
+        self.assertIsNone(client_default.model)
+
+    def test_discover_models_routes_to_openai(self):
+        """Verify discover_models dispatches to _discover_openai_models for openai provider."""
+        client = llm_client.LLMClient(provider="openai")
+        with patch.object(client, '_discover_openai_models', return_value=['gpt-4o', 'gpt-4o-mini']) as mock_disc:
+            result = client.discover_models()
+            mock_disc.assert_called_once()
+            self.assertEqual(result, ['gpt-4o', 'gpt-4o-mini'])
+
+    def test_auto_provider_resolution(self):
+        """Verify auto-detection picks the right provider from available credentials."""
+        # Case 1: Only OPENAI_API_KEY → should resolve to 'openai'
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
+            with patch.object(llm_client.LLMClient, '_has_adc', return_value=False):
+                client = llm_client.LLMClient(provider="auto")
+                self.assertEqual(client.provider, "openai")
+                self.assertEqual(client.api_key, "sk-test")
+
+        # Case 2: Only GEMINI_API_KEY → should resolve to 'gemini'
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "gemini-test"}, clear=True):
+            with patch.object(llm_client.LLMClient, '_has_adc', return_value=False):
+                client = llm_client.LLMClient(provider="auto")
+                self.assertEqual(client.provider, "gemini")
+                self.assertEqual(client.api_key, "gemini-test")
+
+        # Case 3: Both keys → explicit GEMINI wins (primary provider)
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "gemini-test", "OPENAI_API_KEY": "sk-test"}, clear=True):
+            with patch.object(llm_client.LLMClient, '_has_adc', return_value=False):
+                client = llm_client.LLMClient(provider="auto")
+                self.assertEqual(client.provider, "gemini")
+
+        # Case 4: OPENAI_API_KEY + ADC → explicit key wins over ambient creds
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
+            with patch.object(llm_client.LLMClient, '_has_adc', return_value=True):
+                client = llm_client.LLMClient(provider="auto")
+                self.assertEqual(client.provider, "openai")
+
+        # Case 5: No credentials → stays 'auto'
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(llm_client.LLMClient, '_has_adc', return_value=False):
+                client = llm_client.LLMClient(provider="auto")
+                self.assertEqual(client.provider, "auto")
 
 if __name__ == '__main__':
     unittest.main()

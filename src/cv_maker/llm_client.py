@@ -35,14 +35,55 @@ class LLMClient:
     Abstraction layer for LLM providers.
     Handles prompted requests for CV analysis and tailoring.
     """
-    def __init__(self, provider: str = "auto"):
-        self.provider = provider
-        self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        if not self.api_key and self.provider not in ["auto", "vertex", "github", "anthropic"]:
-            logger.warning("No API key found. LLM features will fallback to Mock Data.")
-        
+    def __init__(self, provider: str = "auto", model: str = None):
+        self.model = model
         self.cache_file = Path("user_content/.model_cache.json")
         self._vertex_region_cache = {}
+
+        # Resolve 'auto' to a concrete provider based on available credentials
+        if provider == "auto":
+            provider = self._resolve_auto_provider()
+
+        self.provider = provider
+
+        # Set api_key for the resolved provider
+        if self.provider == "openai":
+            self.api_key = os.environ.get("OPENAI_API_KEY")
+        elif self.provider in ("gemini", "vertex"):
+            self.api_key = os.environ.get("GEMINI_API_KEY")
+        else:
+            self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+
+        if not self.api_key and self.provider not in ["vertex", "github", "anthropic"]:
+            logger.warning("No API key found. LLM features will fallback to Mock Data.")
+
+        logger.info(f"LLMClient initialised: provider={self.provider}, model={self.model or 'auto-select'}")
+
+    def _resolve_auto_provider(self) -> str:
+        """
+        Detects the best provider from available credentials.
+        Explicit API keys take precedence over ambient GCP credentials (ADC).
+        """
+        has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+        has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
+        has_gcp = bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")) or self._has_adc()
+
+        if has_openai and not has_gemini and not has_gcp:
+            logger.info("Auto-detected provider: openai (OPENAI_API_KEY found)")
+            return "openai"
+        if has_gemini:
+            logger.info("Auto-detected provider: gemini (GEMINI_API_KEY found)")
+            return "gemini"
+        if has_openai:
+            # OpenAI key present alongside GCP credentials — prefer explicit key
+            logger.info("Auto-detected provider: openai (OPENAI_API_KEY found)")
+            return "openai"
+        if has_gcp:
+            logger.info("Auto-detected provider: vertex (GCP credentials found)")
+            return "vertex"
+
+        logger.debug("No provider credentials detected; staying in auto mode.")
+        return "auto"
 
     def _load_cache(self) -> List[str]:
         """Loads valid models from local cache if less than 24h old."""
@@ -177,6 +218,11 @@ class LLMClient:
 
         if not self.api_key and not self._has_adc() and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
             return get_mock_data()
+
+        _call_start = time.time()
+        _prompt_len = len(prompt)
+        logger.info(f"_call_llm: provider={self.provider}, model={self.model or 'auto-select'}, prompt_chars={_prompt_len}")
+        logger.debug(f"_call_llm: prompt preview: {prompt[:200]}...")
         
         try:
             # 0. Github & Anthropic (Placeholders for future implementation)
@@ -186,6 +232,8 @@ class LLMClient:
             if self.provider == "anthropic":
                 # TODO: Implement Anthropic API
                 raise NotImplementedError("Anthropic provider is not yet implemented.")
+
+            last_exception = None
                 
             # 1. Vertex AI (Priority if provider is 'auto' or 'vertex')
             if self.provider in ["auto", "vertex"] and (os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or self._has_adc()):
@@ -204,10 +252,13 @@ class LLMClient:
                     
                     _hclient = httpx.Client(timeout=httpx.Timeout(timeout_sec), verify=verify_val)
                     http_options = {'httpx_client': _hclient}
-                        
-                    PRIORITY_MODELS = [
+
+                    # If user pinned a model, use it directly; otherwise iterate priority list
+                    vertex_models = [self.model] if self.model else [
+                        "gemini-2.5-pro-preview",
                         "gemini-2.5-pro",
                         "gemini-2.5-flash",
+                        "gemini-2.0-flash",
                         "gemini-2.5-flash-lite"
                     ]
                     
@@ -217,8 +268,7 @@ class LLMClient:
                         "us-central1"
                     ]
                     
-                    last_exception = None
-                    for model_name in PRIORITY_MODELS:
+                    for model_name in vertex_models:
                         for region in PRIORITY_REGIONS:
                             # 1. Check if model exists in this region dynamically
                             available_models = self._get_vertex_models_for_region(region)
@@ -267,7 +317,10 @@ class LLMClient:
                         raise
 
             # 2. OpenAI
-            if self.provider in ["auto", "openai"] and self.api_key and self.api_key.startswith("sk-"):
+            _openai_key = os.environ.get("OPENAI_API_KEY") or (
+                self.api_key if self.api_key and self.api_key.startswith("sk-") else None
+            )
+            if self.provider in ["auto", "openai"] and _openai_key:
                 import openai
                 import httpx
                 from cv_maker.ssl_helpers import get_ca_bundle
@@ -276,22 +329,36 @@ class LLMClient:
                 ca_bundle = get_ca_bundle()
                 http_client = httpx.Client(verify=ca_bundle if isinstance(ca_bundle, str) and os.path.exists(ca_bundle) else True)
                 
-                client = openai.OpenAI(api_key=self.api_key, http_client=http_client)
+                client = openai.OpenAI(api_key=_openai_key, http_client=http_client)
+
+                # If user pinned a model, use it directly; otherwise iterate priority list
+                openai_models = [self.model] if self.model else [
+                    'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano',
+                    'gpt-5-mini', 'gpt-5-nano', 'gpt-5',
+                    'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano',
+                    'o4-mini', 'gpt-4o', 'gpt-4o-mini',
+                ]
                 
-                OPENAI_PRIORITY = ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-4o-mini', 'gpt-3.5-turbo']
-                last_exception = None
-                
-                for model_name in OPENAI_PRIORITY:
+                for model_name in openai_models:
                     try:
                         logger.info(f"Attempting OpenAI model: {model_name}")
                         def _gen_openai(m, p):
+                            _t0 = time.time()
                             response = client.chat.completions.create(
                                 model=m,
                                 messages=[{"role": "user", "content": p}],
                                 temperature=0.7
                             )
-                            return response.choices[0].message.content
-                        return self._attempt_with_retry(_gen_openai, model_name, prompt)
+                            result = response.choices[0].message.content
+                            _elapsed = time.time() - _t0
+                            _usage = getattr(response, 'usage', None)
+                            logger.info(f"OpenAI response: model={m}, elapsed={_elapsed:.1f}s, response_chars={len(result)}")
+                            if _usage:
+                                logger.info(f"OpenAI tokens: prompt={_usage.prompt_tokens}, completion={_usage.completion_tokens}, total={_usage.total_tokens}")
+                            return result
+                        result = self._attempt_with_retry(_gen_openai, model_name, prompt)
+                        logger.info(f"_call_llm completed: total_elapsed={time.time() - _call_start:.1f}s")
+                        return result
                     except Exception as e:
                         last_exception = e
                         continue
@@ -319,79 +386,87 @@ class LLMClient:
                 http_options = {'httpx_client': _hclient}
                     
                 client = genai.Client(api_key=self.api_key, http_options=http_options)
-                
-                GEMINI_PRIORITY = [
+
+                # If user pinned a model, use it directly; otherwise iterate priority list
+                gemini_models = [self.model] if self.model else [
+                    'gemini-2.5-pro-preview',
                     'gemini-2.5-pro',
                     'gemini-2.5-flash',
+                    'gemini-2.0-flash',
                     'gemini-2.5-flash-lite'
                 ]
                 
-                last_exception = None
-                
                 # 1. Try our preferred priority models first
-                for model_name in GEMINI_PRIORITY:
+                for model_name in gemini_models:
                     try:
                         logger.info(f"Attempting GenAI priority model: {model_name}")
                         def _gen_genai(m, p):
+                            _t0 = time.time()
                             response = client.models.generate_content_stream(
                                 model=m,
                                 contents=p
                             )
-                            return "".join([chunk.text for chunk in response if chunk.text])
-                        return self._attempt_with_retry(_gen_genai, model_name, prompt)
+                            result = "".join([chunk.text for chunk in response if chunk.text])
+                            logger.info(f"GenAI response: model={m}, elapsed={time.time() - _t0:.1f}s, response_chars={len(result)}")
+                            return result
+                        result = self._attempt_with_retry(_gen_genai, model_name, prompt)
+                        logger.info(f"_call_llm completed: total_elapsed={time.time() - _call_start:.1f}s")
+                        return result
                     except Exception as e:
                         last_exception = e
                         continue
                 
-                # 2. Try Cached Models as fallback
-                cached_models = self._load_cache()
-                if cached_models:
-                    logger.info(f"Loaded {len(cached_models)} models from cache.")
-                    for model_name in cached_models:
-                        if model_name in GEMINI_PRIORITY:
-                            continue # Already tried
-                        try:
-                            logger.info(f"Attempting cached model: {model_name}")
-                            def _gen_cached(m, p):
-                                response = client.models.generate_content_stream(
-                                    model=m,
-                                    contents=p
-                                )
-                                return "".join([chunk.text for chunk in response if chunk.text])
-                            return self._attempt_with_retry(_gen_cached, model_name, prompt)
-                        except Exception as e:
-                            logger.warning(f"Cached model {model_name} failed: {e}")
-                
-                # 3. If Cache failed/empty, try Auto-Discovery
-                logger.info("Cache failed or empty. Attempting auto-discovery...")
-                try:
-                     discovered = self.discover_models(client)
-                     
-                     # Save discovered to cache immediately so next run is fast
-                     if discovered:
-                         self._save_cache(discovered)
+                # Skip cache/discovery fallbacks when user pinned a model
+                if not self.model:
+                    # 2. Try Cached Models as fallback
+                    cached_models = self._load_cache()
+                    if cached_models:
+                        logger.info(f"Loaded {len(cached_models)} models from cache.")
+                        for model_name in cached_models:
+                            if model_name in gemini_models:
+                                continue # Already tried
+                            try:
+                                logger.info(f"Attempting cached model: {model_name}")
+                                def _gen_cached(m, p):
+                                    response = client.models.generate_content_stream(
+                                        model=m,
+                                        contents=p
+                                    )
+                                    return "".join([chunk.text for chunk in response if chunk.text])
+                                return self._attempt_with_retry(_gen_cached, model_name, prompt)
+                            except Exception as e:
+                                logger.warning(f"Cached model {model_name} failed: {e}")
+                    
+                    # 3. If Cache failed/empty, try Auto-Discovery
+                    logger.info("Cache failed or empty. Attempting auto-discovery...")
+                    try:
+                         discovered = self.discover_models(client)
                          
-                         # Only call discovered models IF the cache was empty to begin with 
-                         # (Meaning we had to discover them). We don't want to call models that 
-                         # are NOT in the cache (which is what the original logic did by accident).
-                         if not cached_models:
-                             for model_name in discovered:
-                                 if model_name in GEMINI_PRIORITY:
-                                     continue
-                                 try:
-                                     logger.info(f"Attempting discovered model: {model_name}")
-                                     def _gen_disc(m, p):
-                                         response = client.models.generate_content_stream(
-                                             model=m,
-                                             contents=p
-                                         )
-                                         return "".join([chunk.text for chunk in response if chunk.text])
-                                     return self._attempt_with_retry(_gen_disc, model_name, prompt)
-                                 except Exception as e:
-                                     # Keep trying others
-                                     logger.warning(f"Model {model_name} failed: {e}")
-                except Exception as e:
-                    logger.warning(f"Auto-discovery failed: {e}")
+                         # Save discovered to cache immediately so next run is fast
+                         if discovered:
+                             self._save_cache(discovered)
+                             
+                             # Only call discovered models IF the cache was empty to begin with 
+                             # (Meaning we had to discover them). We don't want to call models that 
+                             # are NOT in the cache (which is what the original logic did by accident).
+                             if not cached_models:
+                                 for model_name in discovered:
+                                     if model_name in gemini_models:
+                                         continue
+                                     try:
+                                         logger.info(f"Attempting discovered model: {model_name}")
+                                         def _gen_disc(m, p):
+                                             response = client.models.generate_content_stream(
+                                                 model=m,
+                                                 contents=p
+                                             )
+                                             return "".join([chunk.text for chunk in response if chunk.text])
+                                         return self._attempt_with_retry(_gen_disc, model_name, prompt)
+                                     except Exception as e:
+                                         # Keep trying others
+                                         logger.warning(f"Model {model_name} failed: {e}")
+                    except Exception as e:
+                        logger.warning(f"Auto-discovery failed: {e}")
 
             if last_exception:
                 raise last_exception
@@ -403,13 +478,19 @@ class LLMClient:
             logger.error(f"Missing dependency for specific provider: {e}")
             return get_mock_data()
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            logger.error(f"LLM call failed after {time.time() - _call_start:.1f}s: {e}")
             return get_mock_data()
 
     def discover_models(self, client=None) -> List[str]:
         """
-        Dynamically finds available Gemini models (Flash/Pro) supporting generateContent.
+        Dynamically finds available models for the active provider.
+        Supports Gemini (google-genai SDK) and OpenAI.
         """
+        # --- OpenAI discovery ---
+        if self.provider == "openai":
+            return self._discover_openai_models()
+
+        # --- Gemini / Vertex discovery ---
         if not client:
              if self.provider == "vertex": 
                  return None # Not implemented for vertex dynamic yet
@@ -421,14 +502,6 @@ class LLMClient:
                  return None
 
         try:
-            # List models
-            # SDK v1beta pattern might differ, but assuming standard list_models
-            # The new SDK might use client.models.list()
-            # We filter for 'gemini' and 'flash' to be safe, or just return the first valid one
-            
-            # Note: The google-genai SDK implementation for listing might vary. 
-            # We will try a generic approach or catch errors.
-            
             # Correct method for new SDK is often client.models.list()
             pager = client.models.list() 
             
@@ -438,12 +511,10 @@ class LLMClient:
                 if not methods:
                      methods = getattr(model, 'supported_generation_methods', []) # Fallback check 
                 
-                # Check for generateContent (case insensitive just in case)
-                # In new SDK it might be 'generateContent' strings in the list
+                # Include all Gemini models that support generateContent
                 if methods and any("generatecontent" == m.lower() for m in methods):
                      name = model.name.split("/")[-1] 
-                     name_lower = name.lower()
-                     if "gemini" in name_lower and ("flash" in name_lower or "pro" in name_lower):
+                     if "gemini" in name.lower():
                          candidates.append(name)
             
             return candidates
@@ -452,10 +523,57 @@ class LLMClient:
             logger.warning(f"Failed to list models: {e}")
             return []
 
+    def _discover_openai_models(self) -> List[str]:
+        """Lists available OpenAI models via the OpenAI API."""
+        try:
+            import openai
+            import httpx
+            from cv_maker.ssl_helpers import get_ca_bundle
+
+            api_key = os.environ.get("OPENAI_API_KEY") or self.api_key
+            if not api_key:
+                logger.warning("No OpenAI API key found for model discovery.")
+                return []
+
+            ca_bundle = get_ca_bundle()
+            http_client = httpx.Client(
+                verify=ca_bundle if isinstance(ca_bundle, str) and os.path.exists(ca_bundle) else True
+            )
+            client = openai.OpenAI(api_key=api_key, http_client=http_client)
+
+            models = client.models.list()
+            # Exclude non-chat models (embeddings, audio, image, moderation,
+            # realtime, transcription, TTS, codex, search, computer-use, etc.)
+            _EXCLUDE = (
+                "text-embedding", "tts-", "dall-e", "whisper", "davinci",
+                "babbage", "curie", "ada", "moderation", "embedding",
+                "gpt-image", "chatgpt-image", "gpt-audio", "gpt-realtime",
+                "gpt-4o-audio", "gpt-4o-realtime", "gpt-4o-transcribe",
+                "gpt-4o-mini-audio", "gpt-4o-mini-realtime",
+                "gpt-4o-mini-transcribe", "gpt-4o-mini-tts",
+                "gpt-4o-search", "gpt-4o-mini-search",
+                "computer-use", "omni-moderation", "text-moderation",
+                "sora", "codex-mini", "gpt-oss",
+                "o3-deep-research", "o4-mini-deep-research",
+            )
+            candidates = sorted(
+                [m.id for m in models.data if not m.id.startswith(_EXCLUDE)]
+            )
+            return candidates
+
+        except ImportError:
+            logger.warning("openai package not installed. Cannot discover OpenAI models.")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to list OpenAI models: {e}")
+            return []
+
     def analyze_job_description(self, text: str) -> JobDescription:
         """
         Extracts key skills and summary from raw JD text.
         """
+        logger.info(f"analyze_job_description: input_chars={len(text)}")
+        _start = time.time()
         prompt = f"""
         You are an expert technical recruiter. Analyze the following Job Description.
         Extract a specific 'role_title' (e.g. 'Senior Python Engineer').
@@ -475,21 +593,25 @@ class LLMClient:
         json_str = self._clean_json(self._call_llm(prompt))
         try:
             data = json.loads(json_str)
-            return JobDescription(
+            jd = JobDescription(
                 raw_text=text,
                 role_title=data.get("role_title", "Top Candidate"),
                 key_skills=data.get("key_skills", []),
                 summary=data.get("summary", "")
             )
+            logger.info(f"analyze_job_description completed: elapsed={time.time() - _start:.1f}s, role='{jd.role_title}', skills={len(jd.key_skills)}")
+            return jd
         except json.JSONDecodeError:
-            logger.error("Failed to decode LLM response for JD analysis")
+            logger.error(f"Failed to decode LLM response for JD analysis (elapsed={time.time() - _start:.1f}s)")
+            logger.debug(f"Raw JD analysis response: {json_str[:500]}")
             return JobDescription(raw_text=text)
 
     def tailor_cv(self, master_cv_text: str, jd: JobDescription, github_context: str = "", summarize_years: int = 10) -> CVData:
         """
         Selects relevant experience from the master CV to match the JD.
         """
-        
+        logger.info(f"tailor_cv: master_cv_chars={len(master_cv_text)}, target_role='{jd.role_title}', summarize_years={summarize_years}")
+        _start = time.time()
         github_section = ""
         if github_context:
             github_section = f"\nTECHNICAL PORTFOLIO (GITHUB):\n{github_context}\n"
@@ -610,6 +732,8 @@ class LLMClient:
             # Map Projects to tuples
             projs = [to_tuple_2(p) for p in raw.get("projects", [])]
 
+            logger.info(f"tailor_cv completed: elapsed={time.time() - _start:.1f}s, experience_entries={len(exp_list)}, earlier_entries={len(earlier_list)}")
+
             return CVData(
                 name=raw.get("name", ""),
                 title=raw.get("title", ""),
@@ -624,14 +748,16 @@ class LLMClient:
             )
 
         except Exception as e:
-            logger.error(f"Failed to map LLM response to CVData: {e}")
-            logger.info(f"Raw response: {json_str}")
+            logger.error(f"Failed to map LLM response to CVData (elapsed={time.time() - _start:.1f}s): {e}")
+            logger.debug(f"Raw tailor_cv response: {json_str[:500]}")
             return default_data
 
     def generate_cover_letter(self, master_cv_text: str, jd: JobDescription) -> str:
         """
         Generates a tailored cover letter based on the JD and Master CV.
         """
+        logger.info(f"generate_cover_letter: target_role='{jd.role_title}', master_cv_chars={len(master_cv_text)}")
+        _start = time.time()
         prompt = f"""
         You are an expert executive CV writer. Write a high-impact, professional cover letter for the following role.
         
@@ -649,7 +775,9 @@ class LLMClient:
         5. Length: 300-400 words maximum.
         6. Format: Return ONLY the body of the letter. Do not include address blocks (the system handles that). Start with the Salutation.
         """
-        return self._call_llm(prompt)
+        result = self._call_llm(prompt)
+        logger.info(f"generate_cover_letter completed: elapsed={time.time() - _start:.1f}s, output_chars={len(result)}")
+        return result
 
     def _clean_json(self, text: str) -> str:
         """Helper to strip code fences from LLM output"""

@@ -75,7 +75,7 @@ def setup_logging(verbosity: int, quiet: bool = False, custom_handler: logging.H
     - Console: Default=INFO (dim), -q=ERROR, -v=INFO/DEBUG
     """
     log_dir = Path("user_content/logs")
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "cv.log"
 
     # Root Logger
@@ -238,6 +238,7 @@ def _main_cli():
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress status output (ERROR only)")
     parser.add_argument("--ca-bundle", help="Path to a custom CA certificate bundle for HTTPS verification (proxy environments)")
     parser.add_argument("--provider", default="auto", choices=["auto", "gemini", "vertex", "openai", "anthropic", "github"], help="LLM provider to use (default: auto)")
+    parser.add_argument("--model", default=None, help="Specific model name to use (e.g. gpt-4o, gemini-2.5-pro). Overrides automatic model selection for the chosen provider.")
     
     args = parser.parse_args()
 
@@ -289,16 +290,17 @@ def _run_main_logic(args, parser):
     """
     if args.list_models:
         logger.info("[*] discovering models...")
-        client = LLMClient(provider=args.provider)
+        client = LLMClient(provider=args.provider, model=args.model)
         models = client.discover_models()
         if models:
             # Save to cache explicitly when user runs --list-models
             client._save_cache(models)
-            logger.info("    > Auto-discovered models (cached):")
+            print(f"\nAvailable models for provider '{client.provider}' ({len(models)} found):\n")
             for m in models:
-                logger.info(f"      - {m}")
+                print(f"  - {m}")
+            print()
         else:
-            logger.warning("    [!] Could not auto-discover models. Ensure API key is set.")
+            print(f"\n[!] Could not auto-discover models for provider '{client.provider}'. Ensure API key is set.\n")
         sys.exit(0)
     
     # 0. Pre-validate Template (if provided) to fail fast / save tokens
@@ -354,7 +356,7 @@ def _run_main_logic(args, parser):
     master_cv_text = "\n\n".join([f"--- SOURCE: {k} ---\n{v}" for k, v in library.items()])
 
     # 3. LLM Pipeline
-    client = LLMClient(provider=args.provider)
+    client = LLMClient(provider=args.provider, model=args.model)
     
     logger.info("Analyzing Job Description...")
     jd_data = client.analyze_job_description(jd_text)
